@@ -1,0 +1,212 @@
+package code.spark.dataframe
+import org.apache.log4j.{Level, Logger}
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.functions.udf
+
+object DFFirst {
+  def main(args: Array[String]): Unit = {
+    Logger.getLogger("org").setLevel(Level.ERROR)
+    val spark = SparkSession
+      .builder
+      .appName("SparkSQL")
+      .master("local[*]")
+      .config("spark.sql.warehouse.dir", "file:///C:/temp")
+      .getOrCreate()
+
+    import spark.implicits._
+
+    val compititorData=spark.read
+      .format("csv").option("header", "true").option("delimiter","|").option("inferSchema", "true")
+      .load("F://dataFrom//dataforSpark//ecom//a.txt")
+      .withColumnRenamed("productId","c_productId")
+
+    val internalProductData=spark.read
+      .format("csv").option("header", "true").option("delimiter","|").option("inferSchema", "true")
+      .load("F://dataFrom//dataforSpark//ecom//b.txt")
+      .withColumnRenamed("ProductId","m_productId")
+      .withColumnRenamed("SellerID","P_SellerID")
+
+    val sellerData=spark.read
+      .format("csv").option("header", "true").option("delimiter","|").option("inferSchema", "true")
+      .load("F://dataFrom//dataforSpark//ecom//c.txt")
+
+    val minPriceCompDF=compititorData.groupBy($"c_productId").min("price")
+      .withColumnRenamed("c_productId","c_proc")
+
+    val  minPriceDF= compititorData.join(minPriceCompDF,compititorData("c_productId")  === minPriceCompDF("c_proc") && compititorData("price")  === minPriceCompDF("min(price)"))
+      .withColumnRenamed("min(price)","min_price")
+      .drop($"c_proc")
+
+    val productSellerDF=internalProductData.join(sellerData,$"P_SellerID" === $"SellerID").drop($"P_SellerID")
+
+    val masterDF=productSellerDF.join(minPriceDF,$"m_productId" === $"c_productId")
+      .withColumnRenamed("m_productId","productId")
+      .drop($"c_productId")
+      .drop($"price")
+
+    //masterDF.show(10,false)
+     masterDF.printSchema()
+    val EcomdataCalculate =masterDF.select($"ProductId" ,calculateFinalPriceUDF($"procuredValue",$"maxMargin",$"minMargin",$"min_price",$"saleEvent",$"netValue"),$"lastModified",$"min_price",$"rivalName")
+        .withColumnRenamed("productId","ProductId")
+        .withColumnRenamed("lastModified","TimeStamp")
+        .withColumnRenamed("min_price","Cheapest Price amongst all Rivals")
+        .withColumnRenamed("UDF(procuredValue, maxMargin, minMargin, min_price, saleEvent, netValue)","final-Price")
+    EcomdataCalculate.show(10,false)
+  }
+
+  val calculateFinalPriceUDF = udf(calculateFinalPrice(_:Double,_:Double,_:Double,_:Double,_:String,_:String))
+
+  def calculateFinalPrice(procuredValue: Double,maxMargin:Double,minMargin:Double, min_price:Double,saleEvent:String,netValue:String): Double =
+  {
+    var finalPrice = 0.0
+    val Q= min_price
+    val pcMaxMargin=procuredValue + maxMargin
+    val pcMinMargin=procuredValue + minMargin
+    if(pcMaxMargin < Q)
+    {
+      finalPrice=Q
+    }
+    else if(pcMinMargin < Q)
+    {
+      finalPrice=pcMinMargin
+    }
+    else if(procuredValue < Q)
+    {
+      if(saleEvent.equalsIgnoreCase("Special"))
+      {
+        finalPrice=Q
+      }
+      else
+      {
+        finalPrice=procuredValue
+      }
+    }
+    else if (procuredValue > Q)
+    {
+      if(saleEvent.equalsIgnoreCase("Special") &&  netValue.equalsIgnoreCase("VeryHigh"))
+      {
+        finalPrice=0.9 * procuredValue
+      }
+      else
+      {
+        finalPrice=procuredValue
+      }
+    }
+    else
+    {
+      finalPrice =procuredValue
+    }
+    finalPrice
+  }
+}
+-------------------------
+
+CREATE TABLE TEMP_ecom_competitor_data(
+productId int,
+price float, 
+fetchTS string,
+rivalName string 
+)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY '|' LINES TERMINATED BY '\n'
+STORED AS TEXTFILE;
+
+LOAD DATA LOCAL INPATH '/home/cloudera/Downloads/hive/ecom_competitor_data.txt' INTO TABLE TEMP_ecom_competitor_data;
+
+SET hive.exec.dynamic.partition = true;
+SET hive.exec.dynamic.partition.mode = nonstrict;
+
+
+CREATE TABLE ecom_competitor_data(
+productId int,
+price float, 
+fetchTS string
+)
+PARTITIONED BY(rivalName STRING)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE;
+
+INSERT OVERWRITE TABLE ecom_competitor_data PARTITION (rivalName)
+Select productId ,price,fetchTS,regexp_replace(rivalName,".","_")
+FROM TEMP_ecom_competitor_data;
+--------------------------
+
+
+package code.spark.dataframe
+
+import code.spark.dataframe.PopularMovie.countCoOccurences
+import org.apache.log4j.{Level, Logger}
+import org.apache.spark.SparkContext
+
+object PopularMovie1 {
+  def main(args: Array[String]): Unit = {
+    Logger.getLogger("org").setLevel(Level.ERROR)
+    val sc = new SparkContext("local[*]", "MostPopularSuperhero")
+    val namesRDD = sc.textFile("F://dataFrom//dataforSpark//friendRecommend//d.txt")
+
+    val pairings = namesRDD.map(countCoOccurences)
+    val totalFriendsByCharacter = pairings.reduceByKey( (x,y) => x + y )
+    val flipped = totalFriendsByCharacter.map( x => (x._2, x._1) )
+   // val mostPopular = flipped.max()
+    totalFriendsByCharacter.take(10000).foreach(println)
+    //flipped.take(10).foreach(println)
+
+  }
+
+  def countCoOccurences(line: String) = {
+    var elements = line.split("\\s+")
+    ( elements(0).toInt, elements.length - 2 )
+  }
+
+}
+=============================================
+
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("Soccer").getOrCreate()
+
+from pyspark.sql import functions as fun
+
+question = spark.read.format("csv").option("header", "true").option("delimiter","|").option("inferSchema", "true").load("/FileStore/tables/question_data.txt").withColumnRenamed('QusetionSet','QuestionSet')
+question.printSchema()
+
+student_report = spark.read.format("csv").option("header", "true").option("delimiter","|").option("inferSchema", "true").load("/FileStore/tables/student_consolidated_report.txt").withColumnRenamed('QusetionSet','QuestionSet')
+student_report.printSchema()
+
+student_response = spark.read.format("csv").option("header", "true").option("delimiter","|").option("inferSchema", "true").load("/FileStore/tables/student_response.txt")
+student_response.printSchema()
+
+firstJoin=student_response.join(question,on=['QID','Section'], how='inner')
+secondJoin=firstJoin.join(student_report,on=['StudentID','QuestionSet'],how='inner')
+secondJoin.printSchema()
+
+
+
+thirdval=secondJoin.selectExpr('Section','StudentId',"CASE WHEN Section='QT' THEN QT WHEN Section='RA' THEN RA ELSE VB END marks")\
+          .groupBy('Section','StudentId').agg(fun.sum("marks").alias("marks"))\
+          .selectExpr("*", "ROW_NUMBER() OVER(PARTITION BY Section ORDER BY marks ASC) number_rank")\
+          .join(secondJoin.groupBy('Section').agg(fun.countDistinct("StudentId").alias("count_student_section")), 
+                on='Section', how='inner')\
+          .selectExpr("*", "(number_rank/count_student_section)*100 percentile_dist").where("percentile_dist <= 20.0")
+          
+		  
+secondJoin.groupBy('Section').agg(fun.countDistinct("StudentId").alias("count_student_section"))
+
+
+Next question
+
+secondJoin.selectExpr('Section','StudentId',"CASE WHEN Section='QT' THEN QT WHEN Section='RA' THEN RA ELSE VB END marks")\
+          .groupBy('Section','StudentId').agg(fun.sum("marks").alias("avg_marks")).where("studentid=100170").show(3)
+		  
+		  ------------
+		  
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("Soccer").getOrCreate()
+from pyspark.sql import functions as fun
+friends = spark.read.format("csv").option("header", "false").load("/FileStore/tables/userInteractionData.txt")
+friends.show()
+
+friends.selectExpr('split(_c0," ")[0] id', 'split(_c0," ")[size(split(_c0," "))-1] date','explode(split(_c0," ")) match')\
+       .where('id != match and date!=match and id=10096').selectExpr('*', 'COUNT(*) OVER(PARTITION BY id) counts')\
+       .show()
